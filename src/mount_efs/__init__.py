@@ -65,6 +65,7 @@ LOG_FILE = 'mount.log'
 STATE_FILE_DIR = '/var/run/efs'
 
 FS_ID_RE = re.compile('^(?P<fs_id>fs-[0-9a-f]+)$')
+IP_RE = re.compile("^([01]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])\.([01]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])\.([01]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])\.([01]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])$")
 EFS_FQDN_RE = re.compile('^(?P<fs_id>fs-[0-9a-f]+)\.efs\.(?P<region>[a-z0-9-]+)\.amazonaws.com$')
 
 INSTANCE_METADATA_SERVICE_URL = 'http://169.254.169.254/latest/dynamic/instance-identity/document/'
@@ -275,8 +276,8 @@ def write_stunnel_config_file(config, state_file_dir, fs_id, mountpoint, tls_por
     tls_controls_message = 'WARNING: Your client lacks sufficient controls to properly enforce TLS. Please upgrade stunnel, ' \
         'or disable "%%s" in %s.\nSee %s for more detail.' % (CONFIG_FILE,
                                                               'https://docs.aws.amazon.com/console/efs/troubleshooting-tls')
-
-    if config.getboolean(CONFIG_SECTION, 'stunnel_check_cert_hostname'):
+    
+    if config.getboolean(CONFIG_SECTION, 'stunnel_check_cert_hostname') and FS_ID_RE.match(fs_id):
         if check_host_supported:
             efs_config['checkHost'] = dns_name
         else:
@@ -488,7 +489,7 @@ def mount_nfs(dns_name, path, mountpoint, options):
 
 
 def usage(out, exit_code=1):
-    out.write('Usage: mount.efs [--version] [-h|--help] <fsname> <mountpoint> [-o <options>]\n')
+    out.write('Usage: mount.efs [--version] [-h|--help] <fsname|mount-target IP> <mountpoint> [-o <options>]\n')
     sys.exit(exit_code)
 
 
@@ -503,7 +504,6 @@ def parse_arguments_early_exit(args=None):
     if '--version' in args[1:]:
         sys.stdout.write('%s Version: %s\n' % (args[0], VERSION))
         sys.exit(0)
-
 
 def parse_arguments(config, args=None):
     """Parse arguments, return (fsid, path, mountpoint, options)"""
@@ -613,8 +613,17 @@ def match_device(config, device):
         path = '/'
 
     if FS_ID_RE.match(remote):
-        return remote, path
+    	return remote, path
+    
+    ip_address = IP_RE.match(remote)
 
+    if ip_address:
+	return remote, path
+    else :
+	 fatal_error(
+            'The specified IP "%s" is invalid' % remote
+        )	
+   
     try:
         primary, secondaries, _ = socket.gethostbyname_ex(remote)
         hostnames = filter(lambda e: e is not None, [primary] + secondaries)
@@ -645,7 +654,7 @@ def match_device(config, device):
                     'Please refer to the EFS documentation for mounting with DNS names for examples: %s'
                     % (remote, 'https://docs.aws.amazon.com/efs/latest/ug/mounting-fs-mount-cmd-dns-name.html'))
 
-
+    
 def mount_tls(config, init_system, dns_name, path, fs_id, mountpoint, options):
     with bootstrap_tls(config, init_system, dns_name, fs_id, mountpoint, options) as tunnel_proc:
         mount_completed = threading.Event()
@@ -673,7 +682,6 @@ def main():
 
     config = read_config()
     bootstrap_logging(config)
-
     fs_id, path, mountpoint, options = parse_arguments(config)
 
     logging.info('version=%s options=%s', VERSION, options)
@@ -681,9 +689,13 @@ def main():
 
     init_system = get_init_system()
     check_network_status(fs_id, init_system)
-
-    dns_name = get_dns_name(config, fs_id)
-
+	
+    if FS_ID_RE.match(fs_id):
+	   dns_name = get_dns_name(config, fs_id)
+	
+    else:
+	   dns_name = fs_id
+	
     if 'tls' in options:
         mount_tls(config, init_system, dns_name, path, fs_id, mountpoint, options)
     else:
